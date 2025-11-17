@@ -1,0 +1,250 @@
+---
+title: "Project 2"
+author: "Jack Guan"
+date: "`r Sys.Date()`"
+output: word_document
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE)
+
+# Load required libraries
+library(tidyverse)
+library(lubridate)
+library(knitr)
+
+# Set theme for plots
+theme_set(theme_minimal(base_size = 12))
+```
+
+## Background
+
+Sickle cell disease (SCD) is a group of genetic disorders in which red blood cells contort into a sickle shape. This project examines associations between air pollutants (CO, PM2.5, and O3) and SCD in Durham County, North Carolina, using EPA air quality data from 2018-2020.
+
+```{r data-processing-function}
+# Function to process air quality data
+process_air_quality <- function(filepath) {
+  
+  # Read the CSV file
+  data <- read_csv(filepath, show_col_types = FALSE)
+  
+  # Get the column names
+  col_names <- names(data)
+  
+  # Find the CO column (look for patterns)
+  co_col <- col_names[grep("CO|carbon", col_names, ignore.case = TRUE)]
+  co_col <- co_col[!grepl("units", co_col, ignore.case = TRUE)][1]  # Exclude units columns
+  
+  # Find the PM2.5 column
+  pm_col <- col_names[grep("PM|particulate", col_names, ignore.case = TRUE)]
+  pm_col <- pm_col[!grepl("units", pm_col, ignore.case = TRUE)][1]  # Exclude units columns
+  
+  # Find the O3/Ozone column
+  o3_col <- col_names[grep("O3|Ozone", col_names, ignore.case = TRUE)]
+  o3_col <- o3_col[!grepl("units", o3_col, ignore.case = TRUE)][1]  # Exclude units columns
+  
+  # Select and rename columns
+  data <- data %>%
+    select(Date, 
+           co_concentration = all_of(co_col),
+           pm25_concentration = all_of(pm_col),
+           o3_concentration = all_of(o3_col))
+  
+  # Convert concentration columns to numeric, handling "NA" text and other non-numeric values
+  data <- data %>%
+    mutate(
+      co_concentration = as.numeric(co_concentration),
+      pm25_concentration = as.numeric(pm25_concentration),
+      o3_concentration = as.numeric(o3_concentration)
+    )
+  
+  # Filter out rows with missing or invalid dates (like ######)
+  data <- data %>%
+    filter(!is.na(Date), 
+           !grepl("^#+$", Date),  # Remove rows with just # symbols
+           Date != "")
+  
+  # Format the date variable correctly
+  data <- data %>%
+    mutate(Date = mdy(Date)) %>%
+    filter(!is.na(Date))  # Remove any dates that couldn't be parsed
+  
+  # Remove duplicate rows
+  data <- data %>%
+    distinct()
+  
+  # Calculate daily averages for days with multiple measurements
+  data <- data %>%
+    group_by(Date) %>%
+    summarize(
+      co_concentration = mean(co_concentration, na.rm = TRUE),
+      pm25_concentration = mean(pm25_concentration, na.rm = TRUE),
+      o3_concentration = mean(o3_concentration, na.rm = TRUE)
+    ) %>%
+    ungroup()
+  
+  # Loop through pollutants and set negative values to zero
+  pollutants <- c("co_concentration", "pm25_concentration", "o3_concentration")
+  
+  for (pollutant in pollutants) {
+    # Set negative values to zero
+    data[[pollutant]] <- ifelse(data[[pollutant]] < 0, 0, data[[pollutant]])
+    # Also handle NaN values that might result from mean of all NAs
+    data[[pollutant]] <- ifelse(is.nan(data[[pollutant]]), NA, data[[pollutant]])
+  }
+  
+  # Add month and year variables for plotting
+  data <- data %>%
+    mutate(
+      month = month(Date, label = TRUE),
+      year = year(Date)
+    )
+  
+  return(data)
+}
+```
+
+## Data Processing
+
+```{r load-data}
+# Process the three datasets
+# Note: Update these filenames to match your actual file names
+data_2018 <- process_air_quality("AQ_2018.csv")
+data_2019 <- process_air_quality("AQ_2019.csv")
+data_2020 <- process_air_quality("AQ_2020.csv")
+
+# Combine all datasets
+air_quality_all <- bind_rows(data_2018, data_2019, data_2020)
+
+# Display summary statistics
+summary_table <- air_quality_all %>%
+  summarize(
+    `Mean CO (ppm)` = round(mean(co_concentration, na.rm = TRUE), 2),
+    `Mean PM2.5 (ug/m3)` = round(mean(pm25_concentration, na.rm = TRUE), 2),
+    `Mean O3 (ppm)` = round(mean(o3_concentration, na.rm = TRUE), 3),
+    `Total Days` = n(),
+    `Days with CO data` = sum(!is.na(co_concentration)),
+    `Days with PM2.5 data` = sum(!is.na(pm25_concentration)),
+    `Days with O3 data` = sum(!is.na(o3_concentration))
+  )
+
+kable(summary_table, caption = "Summary Statistics for Air Quality Data (2018-2020)")
+```
+
+## Results
+
+### Monthly Average CO and O3 Concentrations
+
+```{r plot1, fig.width=10, fig.height=6}
+# Calculate monthly averages across all years with 95% CI
+monthly_co_o3 <- air_quality_all %>%
+  group_by(month) %>%
+  summarize(
+    co_mean = mean(co_concentration, na.rm = TRUE),
+    co_sd = sd(co_concentration, na.rm = TRUE),
+    co_n = sum(!is.na(co_concentration)),
+    co_se = co_sd / sqrt(co_n),
+    co_ci_lower = co_mean - 1.96 * co_se,
+    co_ci_upper = co_mean + 1.96 * co_se,
+    
+    o3_mean = mean(o3_concentration, na.rm = TRUE),
+    o3_sd = sd(o3_concentration, na.rm = TRUE),
+    o3_n = sum(!is.na(o3_concentration)),
+    o3_se = o3_sd / sqrt(o3_n),
+    o3_ci_lower = o3_mean - 1.96 * o3_se,
+    o3_ci_upper = o3_mean + 1.96 * o3_se
+  )
+
+# Reshape data for plotting
+plot_data_1 <- monthly_co_o3 %>%
+  pivot_longer(
+    cols = c(co_mean, o3_mean),
+    names_to = "pollutant",
+    values_to = "concentration"
+  ) %>%
+  mutate(
+    ci_lower = ifelse(pollutant == "co_mean", co_ci_lower, o3_ci_lower),
+    ci_upper = ifelse(pollutant == "co_mean", co_ci_upper, o3_ci_upper),
+    pollutant = factor(pollutant, 
+                      levels = c("co_mean", "o3_mean"),
+                      labels = c("CO", "O3"))
+  )
+
+# Create plot
+ggplot(plot_data_1, aes(x = month, y = concentration, color = pollutant, group = pollutant)) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 3) +
+  geom_errorbar(aes(ymin = ci_lower, ymax = ci_upper), 
+                width = 0.3, linewidth = 0.8, alpha = 0.7) +
+  scale_color_manual(values = c("CO" = "#D55E00", "O3" = "#0072B2"),
+                    name = "Pollutant") +
+  labs(
+    title = "Monthly Average CO and O3 Concentrations in Durham County",
+    subtitle = "Averaged over 2018-2020 with 95% confidence intervals",
+    x = "Month",
+    y = "Concentration (ppm)",
+    caption = "Data source: EPA air quality monitoring at RDU airport"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    legend.position = "top",
+    plot.title = element_text(face = "bold", size = 14),
+    panel.grid.minor = element_blank()
+  )
+```
+
+**Figure 1:** Monthly trends show that ozone concentrations peak during summer months (June-August), while CO concentrations remain relatively stable throughout the year with slight increases in winter months.
+
+### PM2.5 Concentrations by Month and Year
+
+```{r plot2, fig.width=10, fig.height=6}
+# Calculate monthly averages by year for PM2.5
+monthly_pm25 <- air_quality_all %>%
+  group_by(month, year) %>%
+  summarize(
+    pm25_mean = mean(pm25_concentration, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# Create plot with line and point geom
+ggplot(monthly_pm25, aes(x = month, y = pm25_mean, color = factor(year), group = year)) +
+  geom_line(linewidth = 1.2, alpha = 0.8) +
+  geom_point(size = 3.5, alpha = 0.9) +
+  scale_color_manual(
+    values = c("2018" = "#E69F00", "2019" = "#56B4E9", "2020" = "#009E73"),
+    name = "Year"
+  ) +
+  labs(
+    title = "Monthly PM2.5 Concentrations in Durham County by Year",
+    subtitle = "Daily mean particulate matter concentrations (2018-2020)",
+    x = "Month",
+    y = "PM2.5 Concentration (µg/m³)",
+    caption = "Data source: EPA air quality monitoring at RDU airport\nNote: 2020 data only available through April"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    legend.position = "top",
+    plot.title = element_text(face = "bold", size = 14),
+    panel.grid.minor = element_blank()
+  )
+```
+
+**Figure 2:** PM2.5 concentrations show seasonal variation with peaks typically occurring in summer months. The 2020 data (available only through April) shows similar patterns to previous years during the overlapping months.
+
+## Discussion
+
+The analysis reveals distinct seasonal patterns in air pollutant concentrations:
+
+- **Ozone (O3)** shows strong seasonality with peak concentrations during summer months, consistent with photochemical ozone formation during periods of high temperature and sunlight.
+
+- **Carbon Monoxide (CO)** remains relatively stable year-round with modest increases during winter, potentially related to heating and reduced atmospheric mixing.
+
+- **Particulate Matter (PM2.5)** demonstrates variable patterns across months and years, with notable peaks during summer months that may be associated with wildfire smoke or atmospheric stagnation events.
+
+These temporal patterns in air pollution exposure may be relevant for understanding vaso-occlusive episodes and emergency department utilization among sickle cell disease patients in Durham County.
+
+```{r session-info, include=FALSE}
+# Document session information for reproducibility
+sessionInfo()
+```
